@@ -21,3 +21,5 @@ langchain-mcp-adapters>=0.1.0
 youtube-transcript-api>=1.2.3
 faiss-cpu>=1.8.0
 ddgs>=9.0.0
+
+pytest
