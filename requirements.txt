@@ -1,0 +1,21 @@
+# Core LangGraph chatbot
+langgraph>=0.2.0
+langgraph-checkpoint-sqlite>=2.0.0
+langchain-core>=0.3.0
+langchain-google-genai>=2.0.0
+langchain-community>=0.3.0
+langchain-text-splitters>=0.3.0
+python-dotenv>=1.0.1
+
+# User interface
+streamlit>=1.37.0
+requests>=2.32.0
+
+# Model Context Protocol (MCP) integration
+mcp>=1.0.0
+langchain-mcp-adapters>=0.1.0
+
+# YouTube RAG
+youtube-transcript-api>=1.2.3
+faiss-cpu>=1.8.0
+duckduckgo-search>=6.2.0
