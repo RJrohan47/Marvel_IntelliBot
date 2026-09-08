@@ -1,4 +1,4 @@
-"""Stage 1: load captions and ensure the transcript is in English."""
+"""Stage 1: load captions and ensuring the transcript is in English."""
 
 from __future__ import annotations
 
