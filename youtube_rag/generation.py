@@ -1,8 +1,7 @@
 """Stage 6: generate a transcript-grounded answer with timestamp citations."""
 
 from langchain_core.documents import Document
-from langchain_google_genai import ChatGoogleGenerativeAI
-
+from model_fallback import build_chat_models, invoke_with_fallback
 
 def format_timestamp(value: float) -> str:
     total = max(0, int(value))
@@ -13,7 +12,7 @@ def format_timestamp(value: float) -> str:
 
 class GroundedAnswerGenerator:
     def __init__(self, model_name: str = "gemini-3.6-flash") -> None:
-        self.model = ChatGoogleGenerativeAI(model=model_name, temperature=0)
+        self.model, self.fallback_model = build_chat_models(temperature=0, primary_model_name=model_name)
 
     def generate(self, question: str, video_id: str, chunks: list[Document]) -> str:
         if not chunks:
@@ -29,7 +28,7 @@ class GroundedAnswerGenerator:
             "Do not invent facts, speakers, titles, or timestamps. Answer clearly and concisely.\n\n"
             f"Question: {question}\n\nTranscript evidence:\n{evidence}"
         )
-        response = self.model.invoke(prompt)
+        response = invoke_with_fallback(self.model, self.fallback_model, prompt)
         answer = response.content if isinstance(response.content, str) else str(response.content)
         sources = "\n".join(
             f"- [{format_timestamp(chunk.metadata['start_seconds'])}-{format_timestamp(chunk.metadata['end_seconds'])}](https://www.youtube.com/watch?v={video_id}&t={int(chunk.metadata['start_seconds'])}s)"

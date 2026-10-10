@@ -16,3 +16,9 @@ DATABASE_PATH = Path(__file__).with_name("marvel_chatbot.db")
 connection = sqlite3.connect(DATABASE_PATH, check_same_thread=False)
 checkpointer = SqliteSaver(conn=connection)
 chatbot = build_workflow(checkpointer)
+
+
+def delete_thread_memory(thread_id: str) -> None:
+    """Delete every LangGraph checkpoint and pending write for one chat thread."""
+
+    checkpointer.delete_thread(str(thread_id))

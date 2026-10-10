@@ -22,10 +22,12 @@ START
   └─ active video attached?
        ├─ yes → youtube_rag → END
        │          (retrieve transcript evidence → grounded Gemini answer)
-       └─ no  → general_agent → tool needed?
-                    ├─ yes → general_tools → general_agent
+       └─ no  → Gemini general_agent → tool needed?
+                    ├─ yes → general_tools → Gemini general_agent
                     └─ no  → END
 ```
+
+Gemini is the primary model for normal chat, tool selection, and YouTube RAG generation. Groq-hosted OpenAI GPT-OSS is a fallback when a provider availability error occurs. Web search retries once and returns a controlled error to Gemini if the search service remains unavailable.
 
 - `marvel_workflow.py` — graph state, nodes, routing
 - `marvel_tools.py` — the general-purpose tools (search, calculator, weather)
@@ -82,7 +84,7 @@ Marvel_IntelliBot/
 
 - **UI:** Streamlit
 - **Orchestration:** LangGraph — explicit state graph, conditional routing, `ToolNode`
-- **LLM:** Google Gemini for chat and embeddings, via `langchain-google-genai`
+- **LLMs:** Google Gemini for chat and embeddings, with OpenAI GPT-OSS 20B hosted on Groq available as a fallback
 - **Vector store:** FAISS, local and per-video, cached to disk
 - **Persistence:** SQLite — chat state through `langgraph-checkpoint-sqlite`, thread/video metadata through a small custom schema
 - **Transcript ingestion:** `youtube-transcript-api`
@@ -119,6 +121,9 @@ Then set your key(s) in `.env`:
 | Variable | Required | Description |
 |---|---|---|
 | `GOOGLE_API_KEY` | Yes | Used for both chat and embeddings. `GEMINI_API_KEY` also works as an alias. |
+| `GROQ_API_KEY` | No | Enables the Groq-hosted model as a fallback when Gemini encounters a provider availability error. |
+| `GROQ_CHAT_MODEL` | No | Groq model ID, default `openai/gpt-oss-20b`. Used only as fallback. |
+| `GEMINI_CHAT_MODEL` | No | Gemini chat model, default `gemini-3.6-flash`. |
 | `WEATHERSTACK_API_KEY` | No | Enables the weather tool; without it, weather queries return a "not configured" message. |
 | `GEMINI_EMBED_MODEL` | No | Embedding model, default `models/gemini-embedding-001`. |
 | `YOUTUBE_RAG_CHUNK_SIZE` | No | Transcript chunk size in characters, default `1200`. |

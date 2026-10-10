@@ -1,9 +1,10 @@
 import streamlit as st
-from langgraph_tool_backend import chatbot, generate_chat_title
-from langchain_core.messages import HumanMessage, AIMessage
+from langgraph_tool_backend import chatbot, delete_thread_memory, generate_chat_title
+from langchain_core.messages import HumanMessage, AIMessage, ToolMessage
 from thread_manager import (
     fetch_thread_list,
     initialize_thread_table,
+    delete_thread_record,
     save_thread_title,
     touch_thread,
 )
@@ -46,6 +47,49 @@ def message_text(content) -> str:
         )
 
     return str(content or "")
+
+
+def tool_display_name(tool_name: str) -> str:
+    """Use readable labels for built-in tools and retain MCP tool names."""
+    known_names = {
+        "duckduckgo_search": "Web Search",
+        "search": "Web Search",
+        "search_tool": "Web Search",
+        "calculator": "Calculator",
+        "get_weather_info": "Weather",
+    }
+    return known_names.get(tool_name.casefold(), tool_name.replace("_", " ").replace("-", " ").title())
+
+
+@st.dialog("Delete chat?")
+def confirm_delete_chat() -> None:
+    """Confirm and remove one chat, including its saved LangGraph state."""
+
+    pending = st.session_state.get("chat_to_delete")
+    if not pending:
+        return
+
+    st.write(f"Delete **{pending['title']}** and all of its saved messages and memory?")
+    cancel_col, delete_col = st.columns(2)
+    if cancel_col.button("Cancel", use_container_width=True):
+        st.session_state["chat_to_delete"] = None
+        st.rerun()
+
+    if delete_col.button("Delete chat", type="primary", use_container_width=True):
+        thread_id = pending["thread_id"]
+        try:
+            delete_thread_memory(thread_id)
+            clear_thread_video(thread_id)
+            delete_thread_record(thread_id)
+        except Exception as exc:
+            st.error(f"Could not completely delete this chat: {exc}")
+            return
+
+        st.session_state["thread_list"] = fetch_thread_list()
+        if st.session_state["thread_id"] == thread_id:
+            new_chat_session()
+        st.session_state["chat_to_delete"] = None
+        st.rerun()
 
 
 # ------------------Creating MARVEL Chatbot UI using streamlit------------------------------
@@ -126,7 +170,8 @@ st.sidebar.header("Recent Chats")
 # this for loop wil generate all the threads and also help user to switch between threads by creating actions
 
 for thread in st.session_state['thread_list']:
-    if st.sidebar.button(thread['title'], key=thread['thread_id']):
+    chat_col, delete_col = st.sidebar.columns([0.84, 0.16], vertical_alignment="center")
+    if chat_col.button(thread['title'], key=thread['thread_id'], use_container_width=True):
         st.session_state['thread_id'] = thread['thread_id']
         active_video = get_thread_video(thread['thread_id'])
         st.session_state['active_video_id'] = active_video['video_id'] if active_video else None
@@ -148,6 +193,13 @@ for thread in st.session_state['thread_list']:
             temp_message_history.append({'role': role, 'content': content})
 
         st.session_state['message_history']=temp_message_history  
+
+    if delete_col.button("🗑️", key=f"delete_{thread['thread_id']}", help="Delete this chat"):
+        st.session_state["chat_to_delete"] = thread
+        st.rerun()
+
+if st.session_state.get("chat_to_delete"):
+    confirm_delete_chat()
 
 
 
@@ -191,6 +243,19 @@ if user_input:
         "run_name": "chat_turn"
     }
     with st.chat_message('assistant'):
+        progress = st.status("Thinking through your question...", expanded=False)
+        active_stage = {"name": "thinking"}
+        requested_tools = set()
+
+        def report_tool_requested(tool_name: str) -> None:
+            if not tool_name:
+                return
+            display_name = tool_display_name(tool_name)
+            if tool_name not in requested_tools:
+                requested_tools.add(tool_name)
+                progress.write(f"Using **{display_name}**")
+            progress.update(label="Using tools...", state="running", expanded=True)
+            active_stage["name"] = "tools"
 
         def ai_text_stream():
             for message_chunk, metadata in chatbot.stream(
@@ -201,12 +266,35 @@ if user_input:
                 config=CONFIG,
                 stream_mode='messages'
             ):
+                node = metadata.get("langgraph_node")
+                if node == "general_agent":
+                    # Tool names arrive in streamed tool-call chunks before ToolNode runs.
+                    for tool_chunk in getattr(message_chunk, "tool_call_chunks", []) or []:
+                        report_tool_requested(tool_chunk.get("name", ""))
+                    # Some integrations provide complete calls rather than streamed chunks.
+                    for tool_call in getattr(message_chunk, "tool_calls", []) or []:
+                        report_tool_requested(tool_call.get("name", ""))
+                elif node == "general_tools":
+                    if isinstance(message_chunk, ToolMessage):
+                        progress.update(label="Processing tool results...", state="running", expanded=True)
+                        active_stage["name"] = "tools"
+                    elif active_stage["name"] != "tools":
+                        progress.update(label="Running requested tool...", state="running", expanded=True)
+                        active_stage["name"] = "tools"
+                elif node == "youtube_rag" and active_stage["name"] != "video":
+                    progress.update(label="Searching the video transcript...", state="running")
+                    active_stage["name"] = "video"
+
                 if isinstance(message_chunk, AIMessage):
                     text = message_text(message_chunk.content)
                     if text:
+                        if active_stage["name"] != "generating":
+                            progress.update(label="Writing the response...", state="running")
+                            active_stage["name"] = "generating"
                         yield text
 
         AI_response = st.write_stream(ai_text_stream())
+        progress.update(label="Response ready", state="complete", expanded=False)
 
     # adding Ai response to message history
     st.session_state['message_history'].append({'role':'assistant', 'content':AI_response})

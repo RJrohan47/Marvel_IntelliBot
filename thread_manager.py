@@ -75,6 +75,16 @@ def touch_thread(thread_id: str) -> None:
         )
 
 
+def delete_thread_record(thread_id: str) -> None:
+    """Remove the thread from the sidebar metadata table."""
+
+    with _connection() as connection:
+        connection.execute(
+            "DELETE FROM chat_threads WHERE thread_id = ?",
+            (str(thread_id),),
+        )
+
+
 
 def fetch_thread_list() -> list[dict[str, str]]:
     with _connection() as connection:

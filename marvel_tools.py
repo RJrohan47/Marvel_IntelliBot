@@ -3,13 +3,35 @@
 from __future__ import annotations
 
 import os
-
+import logging
+import time
+from mcp_client import expense_tracker_tool
 import requests
 from langchain_community.tools import DuckDuckGoSearchRun
 from langchain_core.tools import tool
 
 
-search_tool = DuckDuckGoSearchRun(region="us-en")
+logger = logging.getLogger(__name__)
+_search_backend = DuckDuckGoSearchRun(region="us-en")
+
+
+@tool
+def search_tool(query: str) -> str:
+    """Search the web for current information and return matching results."""
+    last_error = None
+    for attempt in range(2):
+        try:
+            return str(_search_backend.invoke(query))
+        except Exception as exc:
+            last_error = exc
+            if attempt == 0:
+                time.sleep(0.5)
+
+    logger.warning("Web search failed after retry: %s", last_error)
+    return (
+        "[TOOL_ERROR] Web search failed after a retry. Live search is temporarily "
+        "unavailable; do not invent or present current information as verified."
+    )
 
 
 @tool
@@ -28,6 +50,7 @@ def calculator(first_num: float, second_num: float, operation: str) -> dict:
     return {"first_num": first_num, "second_num": second_num, "operation": operation, "result": operations[operation]()}
 
 
+
 @tool
 def get_weather_info(city: str) -> dict:
     """Fetch current weather data for a city from Weatherstack."""
@@ -42,4 +65,6 @@ def get_weather_info(city: str) -> dict:
         return {"error": f"Weather service request failed: {exc}"}
 
 
-GENERAL_TOOLS = [search_tool, calculator, get_weather_info]
+EXPENSE_TOOLS = expense_tracker_tool()
+
+GENERAL_TOOLS = [search_tool, calculator, get_weather_info,*EXPENSE_TOOLS]
