@@ -9,6 +9,7 @@ import sqlite3
 from functools import lru_cache
 
 from langchain_community.vectorstores import FAISS
+from langchain_core.documents import Document
 
 from youtube_rag.cleaning import TranscriptCleaner
 from youtube_rag.config import CHUNK_OVERLAP, CHUNK_SIZE, DATABASE_PATH, EMBEDDING_MODEL, MMR_FETCH_K, RETRIEVAL_K
@@ -101,6 +102,24 @@ def clear_thread_video(thread_id: str) -> None:
 
 
 def answer_video_question(question: str, video_id: str) -> str:
+    chunks = retrieve_video_chunks(question, video_id)
+    return generate_video_answer(question, video_id, chunks)
+
+
+def retrieve_video_chunks(question: str, video_id: str) -> list[Document]:
+    """Retrieve transcript evidence from the cached index for a video question."""
     vector_store = get_or_create_vector_store(video_id)
-    chunks = MMRTranscriptRetriever(vector_store, top_k=RETRIEVAL_K, fetch_k=MMR_FETCH_K).retrieve(question)
-    return GroundedAnswerGenerator().generate(question, video_id, chunks)
+    return MMRTranscriptRetriever(
+        vector_store, top_k=RETRIEVAL_K, fetch_k=MMR_FETCH_K
+    ).retrieve(question)
+
+
+@lru_cache(maxsize=1)
+def _get_answer_generator() -> GroundedAnswerGenerator:
+    """Reuse the configured answer model across questions in this process."""
+    return GroundedAnswerGenerator()
+
+
+def generate_video_answer(question: str, video_id: str, chunks: list[Document]) -> str:
+    """Generate a grounded response from retrieved transcript evidence."""
+    return _get_answer_generator().generate(question, video_id, chunks)

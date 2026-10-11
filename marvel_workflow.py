@@ -16,7 +16,7 @@ from langgraph.prebuilt import ToolNode, tools_condition
 
 from marvel_tools import GENERAL_TOOLS
 from model_fallback import build_chat_models, invoke_with_fallback
-from youtube_rag.service import answer_video_question
+from youtube_rag.workflow import youtube_rag_graph
 
 
 load_dotenv()
@@ -132,12 +132,23 @@ def general_agent_node(state: ChatState) -> dict:
 
 
 def youtube_rag_node(state: ChatState) -> dict:
-    """Grounded video answer. General tools are never exposed on this route."""
+    """Adapt Marvel state to the private-state YouTube RAG subgraph."""
     question = next((message.content for message in reversed(state["messages"]) if isinstance(message, HumanMessage)), "")
     if not question:
         return {"messages": [AIMessage(content="Please ask a question about the attached video.")]}
+    video_id = state.get("active_video_id")
+
+    if not video_id:
+        return {"messages": [AIMessage(content="Please attach a YouTube video first.")]}
+    
     try:
-        answer = answer_video_question(str(question), state["active_video_id"])
+        # The child graph has its own state schema. This wrapper explicitly
+        # maps only the question/video ID in, then maps the answer back to chat.
+        result = youtube_rag_graph.invoke({
+            "question": str(question),
+            "video_id": video_id,
+        })
+        answer = result["answer"]
     except Exception as exc:
         answer = f"I could not search the attached video transcript: {exc}"
     return {"messages": [AIMessage(content=answer)]}
@@ -176,3 +187,5 @@ def generate_chat_title(user_message: str) -> str:
     if isinstance(content, list):
         content = " ".join(item.get("text", "") for item in content if isinstance(item, dict) and item.get("type") == "text")
     return " ".join(str(content).split())[:80] or "New Conversation"
+
+# print(build_workflow(checkpointer=None).get_graph(xray=True).draw_ascii())
