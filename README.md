@@ -4,12 +4,15 @@ Marvel is a Streamlit chatbot I built with LangGraph and Gemini. It's a general 
 
 ## Features
 
-- General chat backed by Gemini, with tool calling for web search, a calculator, and live weather
+- General chat backed by Gemini, with tool calling for web search, a calculator, live weather, and expense tracking
 - YouTube video Q&A: paste a URL or video ID, ask questions grounded only in that video's transcript
 - Every answer includes clickable timestamp citations pointing back to the source clip
 - If the transcript doesn't contain the answer, it says so instead of guessing
 - The transcript is treated as untrusted data in the prompt, not as instructions — text inside a video's captions can't hijack the assistant
 - Chat history persists across restarts (SQLite via LangGraph's checkpointer), and past threads are switchable from the sidebar
+- Short-term memory (STM) builds a bounded model context from a rolling summary and recent complete turns
+- Inactive chat threads are automatically removed after 45 days without activity
+- Expense tracking tools are provided by the external Expense Tracker MCP server
 - A video's transcript is embedded and indexed once; later questions reuse the cached FAISS index instead of rebuilding it
 - New chats get an auto-generated title from the first message
 
@@ -29,8 +32,40 @@ START
 
 Gemini is the primary model for normal chat, tool selection, and YouTube RAG generation. Groq-hosted OpenAI GPT-OSS is a fallback when a provider availability error occurs. Web search retries once and returns a controlled error to Gemini if the search service remains unavailable.
 
+### Short-term memory (STM)
+
+The general assistant uses STM to keep each model request within a configurable, approximate token budget while preserving thread history in the SQLite checkpointer:
+
+1. STM estimates the size of the system prompt, tool schemas, saved summary, and conversation messages.
+2. If the request is over budget, it keeps recent complete turns and summarizes older turns in batches, starting with the oldest.
+3. The model receives the system prompt, the saved summary, and the recent turns. The summary and its message-count cutoff are saved in the thread state for later turns.
+
+The full message list is still retained in the latest checkpoint; STM currently trims the model input only. Summarization is performed only when compaction is needed. If summarization fails, the workflow uses the last saved summary and recent turns, and instructs the assistant not to guess about missing context.
+
+Token counts use LangChain's approximate counter, not the provider's exact tokenizer. The budget is a soft application limit and includes tool schemas in the main assistant request. Defaults can be adjusted with these environment variables:
+
+| Variable | Default | Purpose |
+|---|---:|---|
+| `STM_CONTEXT_TOKEN_BUDGET` | `24000` | Approximate maximum size for the assembled model input |
+| `STM_RECENT_TOKEN_BUDGET` | `8000` | Maximum approximate size of recent turns kept intact |
+| `STM_SUMMARY_BATCH_TOKEN_BUDGET` | `8000` | Approximate size of each older batch sent for summarization |
+| `STM_SUMMARY_TARGET_TOKEN_BUDGET` | `1500` | Approximate target size for the rolling summary |
+
+STM emits estimated token counts and processing times through Python's `INFO` logger. Configure the app's logging level to `INFO` to see those metrics.
+
+The YouTube Q&A route is separate: it uses the current question and attached video's retrieved transcript evidence rather than the general chat history.
+
+### Thread retention
+
+The app deletes an entire thread after 45 days without activity, including its LangGraph checkpoints, thread metadata, and video association. Cleanup runs when the app starts and checks at most once per day per process. Active threads are not currently compacted in the checkpoint database, so their stored message history can continue to grow even though STM limits what is sent to the model.
+
+### Key modules
+
 - `marvel_workflow.py` — graph state, nodes, routing
 - `marvel_tools.py` — the general-purpose tools (search, calculator, weather)
+- `short_term_memory.py` — token estimation, recent-turn trimming, and batched summarization
+- `model_fallback.py` — Gemini and optional Groq model configuration and provider fallback
+- `mcp_client.py` — synchronous wrappers for tools from the external Expense Tracker MCP server
 - `youtube_rag/` — video ingestion, indexing, retrieval
 - `langgraph_tool_backend.py` — wires the graph to a SQLite checkpointer
 - `thread_manager.py` — sidebar chat history (titles, ordering)
@@ -62,7 +97,10 @@ Marvel_IntelliBot/
 ├── frontend.py                  # Streamlit UI: chat window, sidebar, thread switching
 ├── langgraph_tool_backend.py    # Entry point: wires the graph to SQLite persistence
 ├── marvel_workflow.py           # Graph state, nodes, routing (general agent <-> video RAG)
-├── marvel_tools.py              # General tools: web search, calculator, weather
+├── marvel_tools.py              # General tools and Expense Tracker MCP tools
+├── short_term_memory.py         # Token estimation and summary-based model context
+├── model_fallback.py            # Primary and fallback chat model setup
+├── mcp_client.py                # Expense Tracker MCP integration
 ├── thread_manager.py            # Chat sidebar metadata (titles, ordering) in SQLite
 ├── requirements.txt
 ├── .env.example
@@ -87,8 +125,9 @@ Marvel_IntelliBot/
 - **LLMs:** Google Gemini for chat and embeddings, with OpenAI GPT-OSS 20B hosted on Groq available as a fallback
 - **Vector store:** FAISS, local and per-video, cached to disk
 - **Persistence:** SQLite — chat state through `langgraph-checkpoint-sqlite`, thread/video metadata through a small custom schema
+- **STM:** approximate token counting, complete-turn trimming, and rolling summaries for older conversation turns
 - **Transcript ingestion:** `youtube-transcript-api`
-- **Tools:** DuckDuckGo Search (`ddgs`), Weatherstack API
+- **Tools:** DuckDuckGo Search (`ddgs`), Weatherstack API, and an external Expense Tracker MCP server
 
 ## Getting started
 
@@ -126,10 +165,16 @@ Then set your key(s) in `.env`:
 | `GEMINI_CHAT_MODEL` | No | Gemini chat model, default `gemini-3.6-flash`. |
 | `WEATHERSTACK_API_KEY` | No | Enables the weather tool; without it, weather queries return a "not configured" message. |
 | `GEMINI_EMBED_MODEL` | No | Embedding model, default `models/gemini-embedding-001`. |
+| `STM_CONTEXT_TOKEN_BUDGET` | No | STM soft input budget, default `24000` approximate tokens. |
+| `STM_RECENT_TOKEN_BUDGET` | No | STM recent-turn budget, default `8000` approximate tokens. |
+| `STM_SUMMARY_BATCH_TOKEN_BUDGET` | No | Maximum older-message batch size for summarization, default `8000` approximate tokens. |
+| `STM_SUMMARY_TARGET_TOKEN_BUDGET` | No | Target rolling-summary size, default `1500` approximate tokens. |
 | `YOUTUBE_RAG_CHUNK_SIZE` | No | Transcript chunk size in characters, default `1200`. |
 | `YOUTUBE_RAG_CHUNK_OVERLAP` | No | Chunk overlap in characters, default `200`. |
 | `YOUTUBE_RAG_RETRIEVAL_K` | No | Chunks returned per question, default `5`. |
 | `YOUTUBE_RAG_MMR_FETCH_K` | No | Candidate pool size for MMR, default `20`. |
+
+Expense tracking requires the separate Expense Tracker MCP server. `mcp_client.py` currently points to a local Windows installation at `D:\MCP_server\Expense-tracker-MCP-server`; update that path for your environment. If the server is unavailable, the chatbot can still start, but expense tools will not be available.
 
 ### Run it
 
@@ -163,6 +208,9 @@ Tests run automatically on every push and pull request via GitHub Actions (`.git
 ## Known limitations
 
 - Single local SQLite database — no multi-user auth or cloud deployment yet
+- STM keeps the full message list in checkpoints; it reduces model input size but does not compact active-thread storage
+- STM token counts are estimates, and summaries may omit details; exact expense facts should be retrieved from the expense tracker tools
+- Long-term memory shared across separate threads is not implemented
 - English-only transcripts (or auto-translated to English)
 - No live demo deployed yet
 
