@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import sqlite3
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import TypedDict
 
@@ -62,7 +62,7 @@ def save_thread_title(thread_id: str, title: str) -> None:
 
 
 def touch_thread(thread_id: str) -> None:
-    """Update a thread's ordering timestamp after a new message is sent."""
+    """Record recent thread activity and update its sidebar ordering."""
 
     with _connection() as connection:
         connection.execute(
@@ -73,6 +73,20 @@ def touch_thread(thread_id: str) -> None:
             """,
             (_timestamp(), str(thread_id)),
         )
+
+
+def find_expired_threads(retention_days: int) -> list[str]:
+    """Return thread IDs whose last activity is older than the retention period."""
+    if retention_days < 1:
+        raise ValueError("retention_days must be at least 1")
+
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=retention_days)).isoformat()
+    with _connection() as connection:
+        rows = connection.execute(
+            "SELECT thread_id FROM chat_threads WHERE updated_at < ?",
+            (cutoff,),
+        ).fetchall()
+    return [row[0] for row in rows]
 
 
 def delete_thread_record(thread_id: str) -> None:

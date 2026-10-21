@@ -1,5 +1,10 @@
 import streamlit as st
-from langgraph_tool_backend import chatbot, delete_thread_memory, generate_chat_title
+from langgraph_tool_backend import (
+    chatbot,
+    cleanup_expired_threads,
+    delete_thread_memory,
+    generate_chat_title,
+)
 from langchain_core.messages import HumanMessage, AIMessage, ToolMessage
 from thread_manager import (
     fetch_thread_list,
@@ -16,6 +21,7 @@ import uuid
 
 # function to create dynamic thread_id
 def generate_thread_id():
+    # UUID4 strings are 36 characters, well below PostgresSaver's 255-character limit.
     return str(uuid.uuid4())
 
 # function to create new chat session and clear message history
@@ -98,6 +104,7 @@ def confirm_delete_chat() -> None:
 # first creating session_state using streamlit to store our message history
 
 initialize_thread_table()
+expired_thread_ids = cleanup_expired_threads()
 
 
 #--------------------------- Session State for Message History---------------------------------
@@ -109,11 +116,16 @@ if 'message_history' not in st.session_state:
 if 'thread_id' not in st.session_state:
     st.session_state['thread_id']= generate_thread_id() # unique thread id for each session to store
 
+if st.session_state['thread_id'] in expired_thread_ids:
+    new_chat_session()
+
 # creating thread_list for session state to store all the threads created in a session
 # here since we are using sqlite db for our threads, then for every session, everytime it executes , we will store list of threads we have in our db currently 
 
 if 'thread_list' not in st.session_state:
     st.session_state['thread_list']=fetch_thread_list()
+elif expired_thread_ids:
+    st.session_state['thread_list'] = fetch_thread_list()
 
 if 'active_video_id' not in st.session_state:
     st.session_state['active_video_id'] = None
@@ -149,6 +161,7 @@ if attach_video:
     try:
         with st.spinner("Fetching captions and building the video index..."):
             video_id = set_thread_video(st.session_state['thread_id'], video_url)
+        touch_thread(st.session_state['thread_id'])
         st.session_state['active_video_id'] = video_id
         st.session_state['active_video_url'] = f"https://www.youtube.com/watch?v={video_id}"
         st.success("Video context is ready. Your next questions will use its transcript.")
@@ -157,6 +170,7 @@ if attach_video:
 
 if remove_video:
     clear_thread_video(st.session_state['thread_id'])
+    touch_thread(st.session_state['thread_id'])
     st.session_state['active_video_id'] = None
     st.session_state['active_video_url'] = ""
     st.success("Video context removed. Questions will use the general assistant.")
@@ -173,6 +187,7 @@ for thread in st.session_state['thread_list']:
     chat_col, delete_col = st.sidebar.columns([0.84, 0.16], vertical_alignment="center")
     if chat_col.button(thread['title'], key=thread['thread_id'], use_container_width=True):
         st.session_state['thread_id'] = thread['thread_id']
+        touch_thread(thread['thread_id'])
         active_video = get_thread_video(thread['thread_id'])
         st.session_state['active_video_id'] = active_video['video_id'] if active_video else None
         st.session_state['active_video_url'] = active_video['canonical_url'] if active_video else ""

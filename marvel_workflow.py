@@ -14,8 +14,9 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.graph.message import add_messages
 from langgraph.prebuilt import ToolNode, tools_condition
 
-from marvel_tools import GENERAL_TOOLS
+from marvel_tools import EXPENSE_TOOLS, GENERAL_TOOLS
 from model_fallback import build_chat_models, invoke_with_fallback
+from short_term_memory import prepare_model_context
 from youtube_rag.workflow import youtube_rag_graph
 
 
@@ -26,6 +27,38 @@ model, fallback_model = build_chat_models()
 general_model = model.bind_tools(GENERAL_TOOLS)
 fallback_general_model = fallback_model.bind_tools(GENERAL_TOOLS) if fallback_model else None
 
+EXPENSE_TOOL_NAMES = {tool.name for tool in EXPENSE_TOOLS}
+
+GENERAL_SYSTEM_PROMPT = """
+You are a helpful, adaptable assistant.
+Use the current user message and the conversation history for context. 
+Choose an available tool when its description indicates it can provide needed information
+or perform the requested action. Follow the tool's description and argument format;
+when a tool requires a date, use YYYY-MM-DD. Do not invent tool results or claim an action
+succeeded unless the tool output supports that. If a tool's required input is missing, or an
+ambiguous detail could materially change the answer or action, ask one concise, targeted
+follow-up before calling the tool. Do not guess dates, amounts, categories, or which record the
+user means. For an update or deletion, use a record ID or uniquely identify the matching record;
+if more than one record could match, ask the user which one. If a tool returns no matching data
+or fails, say so clearly instead of filling the gap with a guess. Answer directly when the
+available information is sufficient. For questions about the user's expense records, use the
+expense tracker tools as the source of truth instead of relying on conversation history or summaries.
+
+Current date: {current_date}. Use it when interpreting date-sensitive questions or relative dates.
+"""
+
+# only for the expense tools, not the general tools, because the general tools are not used in a way that requires this guidance
+
+EXPENSE_RESULT_GUIDANCE = """
+Use the expense tracker as the source of truth for expense records and amounts; do not use
+conversation summaries as a substitute for querying it. The tracker uses Indian rupees (INR).
+When reporting expense-tool results, use totals and category names exactly as returned. 
+Do not describe one category as an alias, parent, or umbrella for another unless the tool output explicitly establishes
+that relationship. Do not invent explanations for differences between category totals and the overall total; 
+state that the returned values differ and show them. Do not claim the tool changed a record unless
+its result confirms success.
+"""
+
 
 class ChatState(TypedDict):
     """Persistent state stored by the existing SQLite checkpointer."""
@@ -33,6 +66,8 @@ class ChatState(TypedDict):
     messages: Annotated[list[BaseMessage], add_messages]
     active_video_id: NotRequired[str | None]
     model_route: NotRequired[Literal["gemini", "groq"]]
+    context_summary: NotRequired[str]
+    context_summary_message_count: NotRequired[int]
 
 
 def route_initial_request(state: ChatState) -> Literal["general_agent", "youtube_rag"]:
@@ -65,6 +100,28 @@ def _latest_turn_tool_results(state: ChatState) -> list[ToolMessage]:
         message for message in messages[last_user_index + 1:]
         if isinstance(message, ToolMessage)
     ]
+
+
+def _latest_turn_used_expense_tool(state: ChatState) -> bool:
+    """Return whether this turn includes a call to one of the expense tools."""
+    if not EXPENSE_TOOL_NAMES:
+        return False
+
+    messages = state["messages"]
+    last_user_index = max(
+        (index for index, message in enumerate(messages) if isinstance(message, HumanMessage)),
+        default=-1,
+    )
+    for message in messages[last_user_index + 1:]:
+        if isinstance(message, AIMessage):
+            if any(
+                call.get("name") in EXPENSE_TOOL_NAMES
+                for call in (getattr(message, "tool_calls", None) or [])
+            ):
+                return True
+        elif isinstance(message, ToolMessage) and message.name in EXPENSE_TOOL_NAMES:
+            return True
+    return False
 
 
 def _clean_gemini_history(messages: list[BaseMessage]) -> list[BaseMessage]:
@@ -109,15 +166,9 @@ def _clean_gemini_history(messages: list[BaseMessage]) -> list[BaseMessage]:
 
 def general_agent_node(state: ChatState) -> dict:
     """General Gemini chat; it can decide whether to call GENERAL_TOOLS."""
-    system_text = (
-        f"Today's date is {date.today().isoformat()}. "
-        "For expense questions, use the expense tools and pass dates as YYYY-MM-DD. "
-        "Report expense totals and category breakdowns from the tool results. Treat each category "
-        "exactly as returned by the tools; do not claim that one category is an alias, parent, "
-        "or umbrella for another unless a tool explicitly confirms that relationship. Do not "
-        "invent explanations for category differences. If the category totals do not add up to "
-        "the reported overall total, say that the tool results differ and show the returned values."
-    )
+    system_text = GENERAL_SYSTEM_PROMPT.format(current_date=date.today().isoformat())
+    if _latest_turn_used_expense_tool(state):
+        system_text += "\n\n" + EXPENSE_RESULT_GUIDANCE
     if any(
         isinstance(message, ToolMessage) and _tool_result_failed(message)
         for message in _latest_turn_tool_results(state)
@@ -125,9 +176,20 @@ def general_agent_node(state: ChatState) -> dict:
         system_text += " A previous tool call failed. Do not repeat that same failed tool call; explain the limitation or use a different suitable tool."
     system = SystemMessage(content=system_text)
     history = _clean_gemini_history(state["messages"])
+    context = prepare_model_context(
+        system_message=system,
+        history=history,
+        summary=state.get("context_summary", ""),
+        summarized_message_count=state.get("context_summary_message_count", 0),
+        tools=GENERAL_TOOLS,
+        summary_model=model,
+        fallback_summary_model=fallback_model,
+    )
     return {
         "model_route": "gemini",
-        "messages": [invoke_with_fallback(general_model, fallback_general_model, [system, *history])],
+        "messages": [invoke_with_fallback(general_model, fallback_general_model, context.messages)],
+        "context_summary": context.summary,
+        "context_summary_message_count": context.summarized_message_count,
     }
 
 
