@@ -4,13 +4,20 @@ The workflow lives in ``marvel_workflow.py`` so state, nodes, and routes can
 be reviewed independently from persistence and the Streamlit UI.
 """
 
+import atexit
+import os
 import sqlite3
 import logging
+from contextlib import ExitStack
 from pathlib import Path
 from threading import Lock
 from time import monotonic
 
+from dotenv import load_dotenv
+load_dotenv()
+
 from langgraph.checkpoint.sqlite import SqliteSaver
+from langgraph.store.postgres import PostgresStore
 
 from marvel_workflow import build_workflow, generate_chat_title
 from thread_manager import delete_thread_record, find_expired_threads
@@ -20,7 +27,16 @@ from youtube_rag.service import clear_thread_video
 DATABASE_PATH = Path(__file__).with_name("marvel_chatbot.db")
 connection = sqlite3.connect(DATABASE_PATH, check_same_thread=False)
 checkpointer = SqliteSaver(conn=connection)
-chatbot = build_workflow(checkpointer)
+postgres_uri = os.getenv("POSTGRES_URI")
+if not postgres_uri:
+    raise RuntimeError("POSTGRES_URI must be set in .env to enable long-term memory.")
+
+_store_resources = ExitStack()
+memory_store = _store_resources.enter_context(PostgresStore.from_conn_string(postgres_uri))
+atexit.register(_store_resources.close)
+memory_store.setup()
+
+chatbot = build_workflow(checkpointer, store=memory_store)
 logger = logging.getLogger(__name__)
 
 THREAD_RETENTION_DAYS = 45

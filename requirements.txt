@@ -24,3 +24,6 @@ faiss-cpu>=1.8.0
 ddgs>=9.0.0
 
 pytest
+
+langgraph-checkpoint-postgres
+psycopg[binary]

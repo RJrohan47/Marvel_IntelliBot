@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import TypedDict
+from typing import NotRequired, TypedDict
 
 from langchain_core.documents import Document
 from langgraph.graph import END, START, StateGraph
@@ -17,6 +17,7 @@ class YouTubeRagState(TypedDict):
     video_id: str
     retrieved_chunks: list[Document]
     answer: str
+    user_memory_context: NotRequired[str]
 
 
 def retrieve_transcript_evidence(state: YouTubeRagState) -> dict:
@@ -30,7 +31,10 @@ def generate_grounded_answer(state: YouTubeRagState) -> dict:
     """Use the configured answer model to answer from retrieved evidence."""
     return {
         "answer": generate_video_answer(
-            state["question"], state["video_id"], state["retrieved_chunks"]
+            state["question"],
+            state["video_id"],
+            state["retrieved_chunks"],
+            state.get("user_memory_context", ""),
         )
     }
 

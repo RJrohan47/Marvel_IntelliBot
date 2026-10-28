@@ -120,6 +120,13 @@ def _get_answer_generator() -> GroundedAnswerGenerator:
     return GroundedAnswerGenerator()
 
 
-def generate_video_answer(question: str, video_id: str, chunks: list[Document]) -> str:
+def generate_video_answer(
+    question: str,
+    video_id: str,
+    chunks: list[Document],
+    user_memory_context: str = "",
+) -> str:
     """Generate a grounded response from retrieved transcript evidence."""
-    return _get_answer_generator().generate(question, video_id, chunks)
+    return _get_answer_generator().generate(
+        question, video_id, chunks, user_memory_context
+    )

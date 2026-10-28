@@ -11,8 +11,9 @@ Marvel is a Streamlit chatbot I built with LangGraph and Gemini. It's a general 
 - The transcript is treated as untrusted data in the prompt, not as instructions — text inside a video's captions can't hijack the assistant
 - Chat history persists across restarts (SQLite via LangGraph's checkpointer), and past threads are switchable from the sidebar
 - Short-term memory (STM) builds a bounded model context from a rolling summary and recent complete turns
+- Long-term memory (LTM) saves selected user preferences and ongoing context in PostgreSQL for reuse across threads
 - Inactive chat threads are automatically removed after 45 days without activity
-- Expense tracking tools are provided by the external Expense Tracker MCP server
+- Expense tracking tools come from a separate local FastMCP server connected to the chatbot over stdio
 - A video's transcript is embedded and indexed once; later questions reuse the cached FAISS index instead of rebuilding it
 - New chats get an auto-generated title from the first message
 
@@ -55,6 +56,25 @@ STM emits estimated token counts and processing times through Python's `INFO` lo
 
 The YouTube Q&A route is separate: it uses the current question and attached video's retrieved transcript evidence rather than the general chat history.
 
+### Long-term memory (LTM)
+
+The app keeps a small user profile in LangGraph's PostgreSQL `PostgresStore`, separate from the SQLite checkpointer that stores thread history. It uses the shared namespace `("users", user_id, "user_memories")`; the default development user ID is `user_1`, so the same profile is available in each of that user's threads.
+
+Before answering a new user turn, the app reads the existing profile and asks the configured model for structured memory updates from the latest user message. It saves only explicit, reusable details such as preferences and ongoing projects, then includes the updated profile in the current model context. The extractor does not use assistant or tool messages as new memory sources. Because extraction happens before response generation, a newly saved preference can affect the reply to the same turn. This adds a model call before the answer. If extraction or a per-turn store operation fails, the assistant continues without newly loaded memory.
+
+Memory text is included in STM's approximate context-size calculation for general chat. The YouTube Q&A path can use saved preferences for response style only; transcript evidence remains the source for video facts. Semantic vector search is not enabled, so the initial store reads a bounded set of items from the user's namespace and does not require pgvector.
+
+`LTM_USER_ID` is a development identity, not user authentication. A multi-user deployment must derive a stable user ID from authenticated identity instead of sharing `user_1`.
+Deleting or expiring a chat removes that thread's checkpointed history; it does not delete the user's cross-thread LTM profile.
+
+### Expense Tracker MCP server
+
+Expense tracking is provided by a separate local project, `Expense-tracker-MCP-server`, built with **FastMCP**. The server exposes expense operations as MCP tools, including adding, updating, removing, and listing expenses, plus totals, averages, and summaries. It also exposes the available categories as the `expense://categories` MCP resource. The server stores expense records in its own local SQLite database (`expenses.db`); this is separate from both the chatbot's thread-history database and its PostgreSQL LTM store. The expense tracker is the source of truth for exact transaction amounts and dates.
+
+At startup, `mcp_client.py` launches the FastMCP server as a local subprocess over MCP's **stdio** transport. `langchain-mcp-adapters` discovers the server's tools, and the chatbot adapts them for LangGraph's tool node alongside its other general-chat tools. This keeps the expense service as an independently runnable MCP server while letting the chatbot select and call its tools during a conversation. It is a local integration; the server is not hosted remotely.
+
+The chatbot repository does not contain the separate MCP server project. The current client configuration expects it at `D:\MCP_server\Expense-tracker-MCP-server`, with its own Windows virtual environment at `.venv\Scripts\python.exe`. Install the MCP server's dependencies in that environment and update `SERVER_DIR` and `SERVER_PYTHON` in `mcp_client.py` if it lives elsewhere or you use another operating system. If the local server cannot start, the chatbot can still run, but expense tools are unavailable.
+
 ### Thread retention
 
 The app deletes an entire thread after 45 days without activity, including its LangGraph checkpoints, thread metadata, and video association. Cleanup runs when the app starts and checks at most once per day per process. Active threads are not currently compacted in the checkpoint database, so their stored message history can continue to grow even though STM limits what is sent to the model.
@@ -64,8 +84,9 @@ The app deletes an entire thread after 45 days without activity, including its L
 - `marvel_workflow.py` — graph state, nodes, routing
 - `marvel_tools.py` — the general-purpose tools (search, calculator, weather)
 - `short_term_memory.py` — token estimation, recent-turn trimming, and batched summarization
+- `long_term_memory.py` — user-scoped memory extraction, upserts, and context formatting
 - `model_fallback.py` — Gemini and optional Groq model configuration and provider fallback
-- `mcp_client.py` — synchronous wrappers for tools from the external Expense Tracker MCP server
+- `mcp_client.py` — starts the local FastMCP Expense Tracker server over stdio and adapts its tools for the graph
 - `youtube_rag/` — video ingestion, indexing, retrieval
 - `langgraph_tool_backend.py` — wires the graph to a SQLite checkpointer
 - `thread_manager.py` — sidebar chat history (titles, ordering)
@@ -99,6 +120,7 @@ Marvel_IntelliBot/
 ├── marvel_workflow.py           # Graph state, nodes, routing (general agent <-> video RAG)
 ├── marvel_tools.py              # General tools and Expense Tracker MCP tools
 ├── short_term_memory.py         # Token estimation and summary-based model context
+├── long_term_memory.py          # User-scoped profile shared across threads
 ├── model_fallback.py            # Primary and fallback chat model setup
 ├── mcp_client.py                # Expense Tracker MCP integration
 ├── thread_manager.py            # Chat sidebar metadata (titles, ordering) in SQLite
@@ -124,10 +146,10 @@ Marvel_IntelliBot/
 - **Orchestration:** LangGraph — explicit state graph, conditional routing, `ToolNode`
 - **LLMs:** Google Gemini for chat and embeddings, with OpenAI GPT-OSS 20B hosted on Groq available as a fallback
 - **Vector store:** FAISS, local and per-video, cached to disk
-- **Persistence:** SQLite — chat state through `langgraph-checkpoint-sqlite`, thread/video metadata through a small custom schema
+- **Persistence:** SQLite for thread checkpoints and metadata; PostgreSQL for cross-thread LTM
 - **STM:** approximate token counting, complete-turn trimming, and rolling summaries for older conversation turns
 - **Transcript ingestion:** `youtube-transcript-api`
-- **Tools:** DuckDuckGo Search (`ddgs`), Weatherstack API, and an external Expense Tracker MCP server
+- **Tools:** DuckDuckGo Search (`ddgs`), Weatherstack API, and a local FastMCP Expense Tracker server connected over stdio
 
 ## Getting started
 
@@ -135,6 +157,7 @@ Marvel_IntelliBot/
 
 - Python 3.11+
 - A [Google AI Studio](https://aistudio.google.com/apikey) API key (`GOOGLE_API_KEY`)
+- PostgreSQL with a database and login role for long-term memory
 - *(Optional)* A [Weatherstack](https://weatherstack.com/) API key for the weather tool
 
 ### Installation
@@ -163,6 +186,8 @@ Then set your key(s) in `.env`:
 | `GROQ_API_KEY` | No | Enables the Groq-hosted model as a fallback when Gemini encounters a provider availability error. |
 | `GROQ_CHAT_MODEL` | No | Groq model ID, default `openai/gpt-oss-20b`. Used only as fallback. |
 | `GEMINI_CHAT_MODEL` | No | Gemini chat model, default `gemini-3.6-flash`. |
+| `POSTGRES_URI` | Yes | PostgreSQL connection string for LTM; URL-encode special characters in the password. |
+| `LTM_USER_ID` | No | Stable user namespace ID, default `user_1` for local development. |
 | `WEATHERSTACK_API_KEY` | No | Enables the weather tool; without it, weather queries return a "not configured" message. |
 | `GEMINI_EMBED_MODEL` | No | Embedding model, default `models/gemini-embedding-001`. |
 | `STM_CONTEXT_TOKEN_BUDGET` | No | STM soft input budget, default `24000` approximate tokens. |
@@ -174,7 +199,7 @@ Then set your key(s) in `.env`:
 | `YOUTUBE_RAG_RETRIEVAL_K` | No | Chunks returned per question, default `5`. |
 | `YOUTUBE_RAG_MMR_FETCH_K` | No | Candidate pool size for MMR, default `20`. |
 
-Expense tracking requires the separate Expense Tracker MCP server. `mcp_client.py` currently points to a local Windows installation at `D:\MCP_server\Expense-tracker-MCP-server`; update that path for your environment. If the server is unavailable, the chatbot can still start, but expense tools will not be available.
+Expense tracking requires the separate FastMCP server described above. Its code, dependencies, virtual environment, and `expenses.db` are managed in that MCP server project. `mcp_client.py` currently points to a local Windows installation at `D:\MCP_server\Expense-tracker-MCP-server`; update `SERVER_DIR` and `SERVER_PYTHON` in that file for your environment. If the server is unavailable, the chatbot can still start, but expense tools will not be available.
 
 ### Run it
 
@@ -207,10 +232,10 @@ Tests run automatically on every push and pull request via GitHub Actions (`.git
 
 ## Known limitations
 
-- Single local SQLite database — no multi-user auth or cloud deployment yet
+- Local SQLite checkpoints and PostgreSQL LTM — no multi-user auth or cloud deployment yet
 - STM keeps the full message list in checkpoints; it reduces model input size but does not compact active-thread storage
 - STM token counts are estimates, and summaries may omit details; exact expense facts should be retrieved from the expense tracker tools
-- Long-term memory shared across separate threads is not implemented
+- LTM currently uses one configured user ID and has no authentication or per-user account management
 - English-only transcripts (or auto-translated to English)
 - No live demo deployed yet
 

@@ -75,7 +75,7 @@ def confirm_delete_chat() -> None:
     if not pending:
         return
 
-    st.write(f"Delete **{pending['title']}** and all of its saved messages and memory?")
+    st.write(f"Delete **{pending['title']}** and its saved thread history?")
     cancel_col, delete_col = st.columns(2)
     if cancel_col.button("Cancel", use_container_width=True):
         st.session_state["chat_to_delete"] = None
@@ -281,6 +281,11 @@ if user_input:
                 config=CONFIG,
                 stream_mode='messages'
             ):
+                # The graph also streams internal LTM extraction model chunks.
+                # They are structured data for storage, not chat replies.
+                if "ltm_internal" in (metadata.get("tags") or ()):
+                    continue
+
                 node = metadata.get("langgraph_node")
                 if node == "general_agent":
                     # Tool names arrive in streamed tool-call chunks before ToolNode runs.
